@@ -1,0 +1,14 @@
+{
+  "name": "s",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "node scripts/obfuscate-html.js"
+  },
+  "devDependencies": {
+    "cheerio": "^1.0.0",
+    "clean-css": "^5.3.3",
+    "html-minifier-terser": "^7.2.0",
+    "javascript-obfuscator": "^5.5.0"
+  }
+}
