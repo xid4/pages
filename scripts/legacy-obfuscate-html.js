@@ -8,9 +8,12 @@ const JavaScriptObfuscator = require("javascript-obfuscator");
 const CleanCSS = require("clean-css");
 const { minify: minifyHtml } = require("html-minifier-terser");
 
-const ROOT = path.resolve(__dirname, "..");
-const OUT_DIR = path.join(ROOT, "build");
-const IGNORE_DIRS = new Set(["node_modules", ".git", "docs", ".idea", ".ai-jail", "scripts"]);
+const BASE = path.resolve(__dirname, "../");
+const ROOT = path.join(BASE, "legacy");
+const OUT_DIR = path.join(BASE, "docs/legacy");
+const IGNORE_DIRS = new Set([
+    "node_modules", ".git", "docs", "build", ".idea", ".ai-jail", "scripts", "src"
+]);
 
 const OBFUSCATOR_OPTIONS = {
   compact: true,

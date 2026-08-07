@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow" />
+  <title>Visualizador de PDF</title>
+  <style>/* __STYLES__ */</style>
+</head>
+<body>
+  <main id="app">
+    <header id="toolbar" aria-label="Controles do PDF">
+      <button id="prev" type="button" title="Página anterior" aria-label="Página anterior">◀</button>
+      <span id="pageInfo">Página 0 de 0</span>
+      <button id="next" type="button" title="Próxima página" aria-label="Próxima página">▶</button>
+      <button id="zoomOut" type="button" title="Diminuir zoom" aria-label="Diminuir zoom">−</button>
+      <button id="zoomIn" type="button" title="Aumentar zoom" aria-label="Aumentar zoom">+</button>
+      <button id="fit" type="button" title="Ajustar à largura" aria-label="Ajustar à largura">↔</button>
+      <button id="searchToggle" type="button" title="Buscar no texto" aria-label="Buscar no texto" hidden>🔍</button>
+      <button id="download" type="button" title="Baixar PDF" aria-label="Baixar PDF" hidden>⬇</button>
+      <button id="fullscreen" type="button" title="Tela cheia" aria-label="Tela cheia" hidden>⛶</button>
+    </header>
+
+    <section id="viewerContainer" tabindex="0">
+      <div id="pages"></div>
+    </section>
+  </main>
+
+  <div id="searchBar" role="search">
+    <input id="searchInput" type="search" placeholder="Buscar…" aria-label="Termo de busca" />
+    <span id="searchCount">0/0</span>
+    <button id="searchPrev" type="button" title="Anterior" aria-label="Ocorrência anterior">▲</button>
+    <button id="searchNext" type="button" title="Próxima" aria-label="Próxima ocorrência">▼</button>
+    <button id="searchClose" type="button" title="Fechar busca" aria-label="Fechar busca">✕</button>
+  </div>
+
+  <section id="status">
+    <div id="statusBox">
+      <div id="statusTitle">Carregando PDF…</div>
+      <div id="statusDetail"></div>
+    </div>
+  </section>
+
+  <script type="module">/* __BUNDLE__ */</script>
+</body>
+</html>

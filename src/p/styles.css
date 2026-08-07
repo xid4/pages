@@ -1,0 +1,132 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #16181c; color: #f4f4f5; }
+/* Tema claro aplicado via classe quando cfg.theme === "light". */
+html.theme-light { color-scheme: light; }
+html.theme-light body { background: #ececf0; color: #1b1d22; }
+html.theme-light #toolbar { background: #f6f6f8; border-bottom-color: #d5d7de; }
+html.theme-light button { background: #e9eaee; color: #1b1d22; border-color: #c7c9d1; }
+html.theme-light button:hover:not(:disabled) { background: #dee0e6; }
+html.theme-light #status { background: #ececf0; }
+html.theme-light #searchBar { background: #f6f6f8; border-bottom-color: #d5d7de; }
+html.theme-light #searchInput { background: #fff; color: #1b1d22; border-color: #c7c9d1; }
+
+#app { display: grid; grid-template-rows: 56px 1fr; height: 100%; }
+#app.no-toolbar { grid-template-rows: 0 1fr; }
+#toolbar {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 8px 12px; background: #23262b; border-bottom: 1px solid #343840;
+  user-select: none;
+}
+#toolbar[hidden] { display: none; }
+button {
+  min-width: 42px; height: 38px; border: 1px solid #454b55; border-radius: 8px;
+  background: #30343a; color: #fff; cursor: pointer; font-size: 15px;
+}
+button:hover:not(:disabled) { background: #3b4048; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button[hidden] { display: none; }
+#pageInfo { min-width: 120px; text-align: center; font-variant-numeric: tabular-nums; }
+#viewerContainer { overflow: auto; padding: 24px 12px 48px; }
+#pages { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+.page-wrap { position: relative; background: white; box-shadow: 0 4px 22px rgba(0,0,0,.45); }
+canvas { display: block; max-width: none; }
+
+/* Camada de texto (seleção / busca) — subconjunto do pdf_viewer.css do pdf.js.
+   IMPORTANTE: no pdf.js 6.x os spans são posicionados por porcentagem e a
+   fonte/escala vêm das variáveis --font-height/--scale-x/--total-scale-factor.
+   Sem as regras abaixo o texto fica com font-size padrão (16px) e desalinha
+   do canvas. */
+.textLayer {
+  position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1;
+  text-align: initial; text-size-adjust: none; forced-color-adjust: none;
+  transform-origin: 0 0; caret-color: CanvasText; z-index: 1;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.textLayer.no-select { user-select: none; -webkit-user-select: none; }
+.textLayer :is(span, br) {
+  color: transparent; position: absolute; white-space: pre; cursor: text;
+  transform-origin: 0 0;
+}
+/* Dimensiona e escala cada trecho de texto exatamente como o pdf.js. */
+.textLayer > :not(.markedContent),
+.textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.textLayer .markedContent { display: contents; }
+.textLayer ::selection { background: rgba(0, 100, 255, .35); }
+.textLayer mark { color: transparent; background: rgba(255, 224, 0, .45); border-radius: 2px; }
+.textLayer mark.active { background: rgba(255, 145, 0, .7); }
+
+/* Links detectados no texto: âncora inline dentro do span (herda a posição e a
+   escala do texto — alinhamento perfeito em qualquer zoom). */
+.textLayer a.pdf-link {
+  color: transparent; text-decoration: none; cursor: pointer; pointer-events: auto;
+  border-radius: 2px;
+}
+.textLayer a.pdf-link:hover {
+  background: rgba(0, 100, 255, .18); box-shadow: 0 0 0 1px rgba(0, 100, 255, .5);
+}
+/* Com seleção desligada, só os links recebem eventos (não o texto inteiro). */
+.textLayer.no-select { pointer-events: none; }
+.textLayer.no-select a.pdf-link { pointer-events: auto; }
+
+/* Camada de anotações (links clicáveis do PDF). A camada em si não captura
+   eventos — apenas as âncoras — para não bloquear seleção/rolagem. */
+.annotationLayer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.annotationLayer a {
+  position: absolute; display: block; cursor: pointer; border-radius: 2px;
+  pointer-events: auto;
+}
+.annotationLayer a:hover {
+  background: rgba(0, 100, 255, .18); box-shadow: 0 0 0 1px rgba(0, 100, 255, .5);
+}
+
+.watermark {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  pointer-events: none; z-index: 3; overflow: hidden;
+}
+.watermark span {
+  font-size: 44px; font-weight: 800; color: rgba(0, 0, 0, .12);
+  transform: rotate(-30deg); white-space: nowrap; letter-spacing: 2px;
+}
+
+#searchBar {
+  position: fixed; top: 56px; right: 12px; z-index: 12;
+  display: none; align-items: center; gap: 6px;
+  padding: 6px 8px; background: #23262b; border: 1px solid #343840; border-radius: 0 0 8px 8px;
+}
+#searchBar.open { display: flex; }
+#searchInput {
+  height: 34px; min-width: 180px; padding: 0 10px; font-size: 14px;
+  border: 1px solid #454b55; border-radius: 8px; background: #16181c; color: #fff;
+}
+#searchCount { min-width: 54px; text-align: center; font-size: 13px; color: #b7bdc8; }
+#searchBar button { min-width: 34px; height: 34px; font-size: 13px; }
+
+#status {
+  position: fixed; inset: 56px 0 0; display: grid; place-items: center;
+  padding: 24px; text-align: center; background: #16181c; z-index: 10;
+}
+#status[hidden] { display: none; }
+#statusBox { max-width: 720px; }
+#statusTitle { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+#statusDetail { color: #b7bdc8; line-height: 1.5; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  #toolbar { gap: 6px; }
+  button { min-width: 38px; }
+  #pageInfo { min-width: 92px; font-size: 14px; }
+  #searchInput { min-width: 120px; }
+}
+/* Impressão bloqueada por padrão; liberada quando cfg.print === true (classe removida). */
+@media print {
+  html.print-blocked, html.print-blocked body { display: none !important; }
+}

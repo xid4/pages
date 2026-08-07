@@ -1,2 +1,8 @@
-node_modules/
 .idea
+.DS_Store
+.ai-jail
+
+node_modules/
+
+/old/
+uv.lock

@@ -1,0 +1,989 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow" />
+  <title>Visualizador de PDF</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #16181c; color: #f4f4f5; }
+    /* Tema claro aplicado via classe quando cfg.theme === "light". */
+    html.theme-light { color-scheme: light; }
+    html.theme-light body { background: #ececf0; color: #1b1d22; }
+    html.theme-light #toolbar { background: #f6f6f8; border-bottom-color: #d5d7de; }
+    html.theme-light button { background: #e9eaee; color: #1b1d22; border-color: #c7c9d1; }
+    html.theme-light button:hover:not(:disabled) { background: #dee0e6; }
+    html.theme-light #status { background: #ececf0; }
+    html.theme-light #searchBar { background: #f6f6f8; border-bottom-color: #d5d7de; }
+    html.theme-light #searchInput { background: #fff; color: #1b1d22; border-color: #c7c9d1; }
+
+    #app { display: grid; grid-template-rows: 56px 1fr; height: 100%; }
+    #app.no-toolbar { grid-template-rows: 0 1fr; }
+    #toolbar {
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      padding: 8px 12px; background: #23262b; border-bottom: 1px solid #343840;
+      user-select: none;
+    }
+    #toolbar[hidden] { display: none; }
+    button {
+      min-width: 42px; height: 38px; border: 1px solid #454b55; border-radius: 8px;
+      background: #30343a; color: #fff; cursor: pointer; font-size: 15px;
+    }
+    button:hover:not(:disabled) { background: #3b4048; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button[hidden] { display: none; }
+    #pageInfo { min-width: 120px; text-align: center; font-variant-numeric: tabular-nums; }
+    #viewerContainer { overflow: auto; padding: 24px 12px 48px; }
+    #pages { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+    .page-wrap { position: relative; background: white; box-shadow: 0 4px 22px rgba(0,0,0,.45); }
+    canvas { display: block; max-width: none; }
+
+    /* Camada de texto (seleção / busca) — subconjunto do pdf_viewer.css do pdf.js.
+       IMPORTANTE: no pdf.js 6.x os spans são posicionados por porcentagem e a
+       fonte/escala vêm das variáveis --font-height/--scale-x/--total-scale-factor.
+       Sem as regras abaixo o texto fica com font-size padrão (16px) e desalinha
+       do canvas. */
+    .textLayer {
+      position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1;
+      text-align: initial; text-size-adjust: none; forced-color-adjust: none;
+      transform-origin: 0 0; caret-color: CanvasText; z-index: 1;
+      --min-font-size: 1;
+      --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+      --min-font-size-inv: calc(1 / var(--min-font-size));
+    }
+    .textLayer.no-select { user-select: none; -webkit-user-select: none; }
+    .textLayer :is(span, br) {
+      color: transparent; position: absolute; white-space: pre; cursor: text;
+      transform-origin: 0 0;
+    }
+    /* Dimensiona e escala cada trecho de texto exatamente como o pdf.js. */
+    .textLayer > :not(.markedContent),
+    .textLayer .markedContent span:not(.markedContent) {
+      z-index: 1;
+      --font-height: 0;
+      font-size: calc(var(--text-scale-factor) * var(--font-height));
+      --scale-x: 1;
+      --rotate: 0deg;
+      transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+    }
+    .textLayer .markedContent { display: contents; }
+    .textLayer ::selection { background: rgba(0, 100, 255, .35); }
+    .textLayer mark { color: transparent; background: rgba(255, 224, 0, .45); border-radius: 2px; }
+    .textLayer mark.active { background: rgba(255, 145, 0, .7); }
+
+    /* Links detectados no texto: âncora inline dentro do span (herda a posição e a
+       escala do texto — alinhamento perfeito em qualquer zoom). */
+    .textLayer a.pdf-link {
+      color: transparent; text-decoration: none; cursor: pointer; pointer-events: auto;
+      border-radius: 2px;
+    }
+    .textLayer a.pdf-link:hover {
+      background: rgba(0, 100, 255, .18); box-shadow: 0 0 0 1px rgba(0, 100, 255, .5);
+    }
+    /* Com seleção desligada, só os links recebem eventos (não o texto inteiro). */
+    .textLayer.no-select { pointer-events: none; }
+    .textLayer.no-select a.pdf-link { pointer-events: auto; }
+
+    /* Camada de anotações (links clicáveis do PDF). A camada em si não captura
+       eventos — apenas as âncoras — para não bloquear seleção/rolagem. */
+    .annotationLayer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+    .annotationLayer a {
+      position: absolute; display: block; cursor: pointer; border-radius: 2px;
+      pointer-events: auto;
+    }
+    .annotationLayer a:hover {
+      background: rgba(0, 100, 255, .18); box-shadow: 0 0 0 1px rgba(0, 100, 255, .5);
+    }
+
+    .watermark {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      pointer-events: none; z-index: 3; overflow: hidden;
+    }
+    .watermark span {
+      font-size: 44px; font-weight: 800; color: rgba(0, 0, 0, .12);
+      transform: rotate(-30deg); white-space: nowrap; letter-spacing: 2px;
+    }
+
+    #searchBar {
+      position: fixed; top: 56px; right: 12px; z-index: 12;
+      display: none; align-items: center; gap: 6px;
+      padding: 6px 8px; background: #23262b; border: 1px solid #343840; border-radius: 0 0 8px 8px;
+    }
+    #searchBar.open { display: flex; }
+    #searchInput {
+      height: 34px; min-width: 180px; padding: 0 10px; font-size: 14px;
+      border: 1px solid #454b55; border-radius: 8px; background: #16181c; color: #fff;
+    }
+    #searchCount { min-width: 54px; text-align: center; font-size: 13px; color: #b7bdc8; }
+    #searchBar button { min-width: 34px; height: 34px; font-size: 13px; }
+
+    #status {
+      position: fixed; inset: 56px 0 0; display: grid; place-items: center;
+      padding: 24px; text-align: center; background: #16181c; z-index: 10;
+    }
+    #status[hidden] { display: none; }
+    #statusBox { max-width: 720px; }
+    #statusTitle { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+    #statusDetail { color: #b7bdc8; line-height: 1.5; overflow-wrap: anywhere; }
+    @media (max-width: 600px) {
+      #toolbar { gap: 6px; }
+      button { min-width: 38px; }
+      #pageInfo { min-width: 92px; font-size: 14px; }
+      #searchInput { min-width: 120px; }
+    }
+    /* Impressão bloqueada por padrão; liberada quando cfg.print === true (classe removida). */
+    @media print {
+      html.print-blocked, html.print-blocked body { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main id="app">
+    <header id="toolbar" aria-label="Controles do PDF">
+      <button id="prev" type="button" title="Página anterior" aria-label="Página anterior">◀</button>
+      <span id="pageInfo">Página 0 de 0</span>
+      <button id="next" type="button" title="Próxima página" aria-label="Próxima página">▶</button>
+      <button id="zoomOut" type="button" title="Diminuir zoom" aria-label="Diminuir zoom">−</button>
+      <button id="zoomIn" type="button" title="Aumentar zoom" aria-label="Aumentar zoom">+</button>
+      <button id="fit" type="button" title="Ajustar à largura" aria-label="Ajustar à largura">↔</button>
+      <button id="searchToggle" type="button" title="Buscar no texto" aria-label="Buscar no texto" hidden>🔍</button>
+      <button id="download" type="button" title="Baixar PDF" aria-label="Baixar PDF" hidden>⬇</button>
+      <button id="fullscreen" type="button" title="Tela cheia" aria-label="Tela cheia" hidden>⛶</button>
+    </header>
+
+    <section id="viewerContainer" tabindex="0">
+      <div id="pages"></div>
+    </section>
+  </main>
+
+  <div id="searchBar" role="search">
+    <input id="searchInput" type="search" placeholder="Buscar…" aria-label="Termo de busca" />
+    <span id="searchCount">0/0</span>
+    <button id="searchPrev" type="button" title="Anterior" aria-label="Ocorrência anterior">▲</button>
+    <button id="searchNext" type="button" title="Próxima" aria-label="Próxima ocorrência">▼</button>
+    <button id="searchClose" type="button" title="Fechar busca" aria-label="Fechar busca">✕</button>
+  </div>
+
+  <section id="status">
+    <div id="statusBox">
+      <div id="statusTitle">Carregando PDF…</div>
+      <div id="statusDetail"></div>
+    </div>
+  </section>
+
+  <script type="module">
+    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.1.200/build/pdf.mjs";
+
+    const vesion = '1.0.1';
+
+    // console.info(`Carregando PDF (${vesion})`);
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.1.200/build/pdf.worker.mjs";
+
+    const urlParams = new URLSearchParams(location.search);
+
+    const status = document.querySelector("#status");
+    const statusTitle = document.querySelector("#statusTitle");
+    const statusDetail = document.querySelector("#statusDetail");
+    const appElement = document.querySelector("#app");
+    const toolbar = document.querySelector("#toolbar");
+    const pagesElement = document.querySelector("#pages");
+    const viewerContainer = document.querySelector("#viewerContainer");
+    const pageInfo = document.querySelector("#pageInfo");
+    const prevButton = document.querySelector("#prev");
+    const nextButton = document.querySelector("#next");
+    const zoomOutButton = document.querySelector("#zoomOut");
+    const zoomInButton = document.querySelector("#zoomIn");
+    const fitButton = document.querySelector("#fit");
+    const searchToggleButton = document.querySelector("#searchToggle");
+    const downloadButton = document.querySelector("#download");
+    const fullscreenButton = document.querySelector("#fullscreen");
+    const searchBar = document.querySelector("#searchBar");
+    const searchInput = document.querySelector("#searchInput");
+    const searchCount = document.querySelector("#searchCount");
+    const searchPrevButton = document.querySelector("#searchPrev");
+    const searchNextButton = document.querySelector("#searchNext");
+    const searchCloseButton = document.querySelector("#searchClose");
+
+    const DEFAULT_SCALE = 1.25;
+
+    let pdfDocument = null;
+    let scale = DEFAULT_SCALE;
+    let currentPage = 1;
+    let renderGeneration = 0;
+    let pageWrappers = [];
+
+    const searchState = { query: "", marks: [], index: -1 };
+
+    // ---------------------------------------------------------------------------
+    // Utilidades de desofuscação (compartilhadas por `u` e `p`).
+    // ---------------------------------------------------------------------------
+
+    function reverseString(value) {
+      try {
+        return Array.from(value).reverse().join("");
+      } catch {
+        return null;
+      }
+    }
+
+    function startsWithHttp(value) {
+      try {
+        return /^https?:\/\//i.test(value.trim());
+      } catch {
+        return false;
+      }
+    }
+
+    function decodeBase64(value) {
+      try {
+        // Aceita Base64 tradicional e Base64 URL-safe.
+        let normalized = value.trim().replace(/-/g, "+").replace(/_/g, "/");
+        normalized += "=".repeat((4 - normalized.length % 4) % 4);
+
+        const binary = atob(normalized);
+        const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim();
+      } catch {
+        return null;
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Configuração: parâmetro `p` (JSON, possivelmente ofuscado).
+    // Sem `p` (ou ilegível) => configuração vazia => modo mais restrito.
+    // ---------------------------------------------------------------------------
+
+    const DEFAULTS = {
+      u: "",             // fonte do PDF (URL direta/invertida/Base64…)
+      password: "",      // senha do PDF protegido
+      credentials: false,// enviar cookies (withCredentials)
+      autofetch: true,   // pré-carregar documento inteiro
+      stream: true,      // carregamento progressivo
+      page: 1,           // página inicial
+      rotate: 0,         // rotação inicial (0/90/180/270)
+      zoom: null,        // número (escala) ou palavra-chave; null => usa `fit`
+      fit: "width",      // "width" | "none"
+      minzoom: 0.5,
+      maxzoom: 3,
+      zoomstep: 0.25,
+      toolbar: true,     // exibe a barra de ferramentas
+      nav: true,         // botões ◀ ▶
+      zoomctrl: true,    // botões − + ↔
+      // Permissões — todas FALSE por padrão (modo restrito).
+      download: false,
+      print: false,
+      contextmenu: false,
+      hotkeys: false,
+      select: false,     // seleção/cópia de texto
+      search: true,     // caixa de busca
+      links: true,      // hyperlinks do PDF clicáveis
+      fullscreen: true, // botão de tela cheia
+      // Interface.
+      theme: "dark",     // "dark" | "light"
+      watermark: "",     // texto de marca d'água
+      title: ""          // sobrescreve o <title>
+    };
+
+    function tryParseObject(candidate) {
+      if (candidate == null) return null;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch {
+        /* ignora candidato inválido */
+      }
+      return null;
+    }
+
+    function resolveConfig(raw) {
+      if (!raw) return {};
+
+      const reversed = reverseString(raw);
+      const fromBase64 = decodeBase64(raw);
+      const candidates = [
+        { description: "JSON direto", value: raw },
+        { description: "JSON invertido", value: reversed },
+        { description: "Base64 + JSON", value: fromBase64 },
+        { description: "invertido + Base64 + JSON", value: decodeBase64(reversed) },
+        { description: "Base64 + invertido + JSON", value: fromBase64 != null ? reverseString(fromBase64) : null }
+      ];
+
+      for (const candidate of candidates) {
+        const parsed = tryParseObject(candidate.value);
+        if (parsed) {
+          // console.info(`Configuração identificada por: ${candidate.description}`);
+          return parsed;
+        }
+      }
+
+      console.warn("Parâmetro 'p' presente mas ilegível — aplicando modo restrito.");
+      return {};
+    }
+
+    function toBool(value, fallback) {
+      if (value === undefined || value === null) return fallback;
+      if (typeof value === "boolean") return value;
+      if (typeof value === "number") return value !== 0;
+      const normalized = String(value).trim().toLowerCase();
+      if (["1", "true", "yes", "on", "sim"].includes(normalized)) return true;
+      if (["0", "false", "no", "off", "nao", "não"].includes(normalized)) return false;
+      return fallback;
+    }
+
+    function toNumber(value, fallback) {
+      const number = typeof value === "number" ? value : parseFloat(value);
+      return Number.isFinite(number) ? number : fallback;
+    }
+
+    function buildConfig() {
+      const raw = (urlParams.get("p") || "").trim();
+      const parsed = resolveConfig(raw);
+      const merged = { ...DEFAULTS, ...parsed };
+
+      return {
+        // `u` pode vir dentro do JSON ou, por compatibilidade, no parâmetro solto `?u=`.
+        u: (merged.u || urlParams.get("u") || "").trim(),
+        password: typeof merged.password === "string" ? merged.password : "",
+        credentials: toBool(merged.credentials, false),
+        autofetch: toBool(merged.autofetch, true),
+        stream: toBool(merged.stream, true),
+        page: Math.max(1, Math.floor(toNumber(merged.page, 1))),
+        rotate: [0, 90, 180, 270].includes(toNumber(merged.rotate, 0)) ? toNumber(merged.rotate, 0) : 0,
+        zoom: merged.zoom,
+        fit: merged.fit === "none" ? "none" : "width",
+        minzoom: toNumber(merged.minzoom, 0.5),
+        maxzoom: toNumber(merged.maxzoom, 3),
+        zoomstep: toNumber(merged.zoomstep, 0.25),
+        toolbar: toBool(merged.toolbar, true),
+        nav: toBool(merged.nav, true),
+        zoomctrl: toBool(merged.zoomctrl, true),
+        download: toBool(merged.download, false),
+        print: toBool(merged.print, false),
+        contextmenu: toBool(merged.contextmenu, false),
+        hotkeys: toBool(merged.hotkeys, false),
+        select: toBool(merged.select, false),
+        search: toBool(merged.search, true),
+        links: toBool(merged.links, true),
+        fullscreen: toBool(merged.fullscreen, true),
+        theme: merged.theme === "light" ? "light" : "dark",
+        watermark: typeof merged.watermark === "string" ? merged.watermark : "",
+        title: typeof merged.title === "string" ? merged.title : ""
+      };
+    }
+
+    const config = buildConfig();
+
+    // console.info(config);
+
+    const zoomIsNumber = typeof config.zoom === "number" && Number.isFinite(config.zoom);
+    // A camada de texto é necessária tanto para seleção quanto para busca.
+    const needsTextLayer = config.select || config.search || config.links;
+
+    // Detecta URLs no texto (com ou sem esquema). Exige "/" após o domínio nos
+    // casos sem http(s):// para reduzir falsos positivos.
+    const URL_PATTERN = /(?:https?:\/\/|www\.)[^\s<>()"']+|(?:[a-z0-9][a-z0-9-]*\.)+[a-z]{2,}\/[^\s<>()"']+/gi;
+
+    // ---------------------------------------------------------------------------
+    // Fonte do PDF (parâmetro `u`, com a mesma desofuscação de antes).
+    // ---------------------------------------------------------------------------
+
+    function validatePdfUrl(value) {
+      let parsed;
+      try {
+        parsed = new URL(value.trim());
+      } catch {
+        throw new Error("A URL encontrada não é válida.");
+      }
+
+      if (!["http:", "https:"].includes(parsed.protocol)) {
+        throw new Error("Somente URLs HTTP ou HTTPS são permitidas.");
+      }
+
+      return parsed.href;
+    }
+
+    function resolvePdfSource(value) {
+      if (!value) {
+        throw new Error("Informe o PDF");
+      }
+
+      const reversed = reverseString(value);
+      const candidates = [
+        { description: "URL direta", value },
+        { description: "string invertida", value: reversed },
+        { description: "Base64", value: decodeBase64(value) },
+        { description: "string invertida em Base64", value: decodeBase64(reversed) },
+        { description: "string Base64 em invertida", value: reverseString(decodeBase64(value)) }
+      ];
+
+      for (const candidate of candidates) {
+        if (candidate.value && startsWithHttp(candidate.value)) {
+          // console.info(`PDF identificado por: ${candidate.description}`);
+          return validatePdfUrl(candidate.value);
+        }
+      }
+
+      throw new Error(
+        "O parâmetro 'u' não contém uma URL HTTP/HTTPS direta, invertida, codificada em Base64 ou invertida e codificada em Base64."
+      );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Aplicação da configuração à interface e aos bloqueios.
+    // ---------------------------------------------------------------------------
+
+    function applyConfig() {
+      if (config.theme === "light") document.documentElement.classList.add("theme-light");
+
+      if (config.title) document.title = config.title;
+
+      if (!config.toolbar) {
+        toolbar.hidden = true;
+        appElement.classList.add("no-toolbar");
+      }
+
+      prevButton.hidden = !config.nav;
+      nextButton.hidden = !config.nav;
+
+      zoomOutButton.hidden = !config.zoomctrl;
+      zoomInButton.hidden = !config.zoomctrl;
+      fitButton.hidden = !config.zoomctrl;
+
+      searchToggleButton.hidden = !config.search;
+      downloadButton.hidden = !config.download;
+      fullscreenButton.hidden = !config.fullscreen;
+
+      // Impressão bloqueada por padrão; libera removendo a classe.
+      if (!config.print) document.documentElement.classList.add("print-blocked");
+
+      scale = zoomIsNumber ? clampScale(config.zoom) : DEFAULT_SCALE;
+    }
+
+    function clampScale(value) {
+      return Math.min(Math.max(value, config.minzoom), config.maxzoom);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Status.
+    // ---------------------------------------------------------------------------
+
+    function showStatus(title, detail = "") {
+      statusTitle.textContent = title;
+      statusDetail.textContent = detail;
+      status.hidden = false;
+    }
+
+    function hideStatus() {
+      status.hidden = true;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Barra de ferramentas / navegação.
+    // ---------------------------------------------------------------------------
+
+    function updateToolbar() {
+      const total = pdfDocument?.numPages || 0;
+      pageInfo.textContent = `Página ${currentPage} de ${total}`;
+      prevButton.disabled = !pdfDocument || currentPage <= 1;
+      nextButton.disabled = !pdfDocument || currentPage >= total;
+      zoomOutButton.disabled = !pdfDocument || scale <= config.minzoom;
+      zoomInButton.disabled = !pdfDocument || scale >= config.maxzoom;
+      fitButton.disabled = !pdfDocument;
+      downloadButton.disabled = !pdfDocument;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Renderização.
+    // ---------------------------------------------------------------------------
+
+    async function renderTextLayer(page, viewport, wrapper) {
+      const textLayerDiv = document.createElement("div");
+      textLayerDiv.className = "textLayer";
+      if (!config.select) textLayerDiv.classList.add("no-select");
+      textLayerDiv.style.width = `${Math.floor(viewport.width)}px`;
+      textLayerDiv.style.height = `${Math.floor(viewport.height)}px`;
+      wrapper.style.setProperty("--scale-factor", String(scale));
+      wrapper.style.setProperty("--total-scale-factor", String(scale));
+      wrapper.appendChild(textLayerDiv);
+
+      try {
+        const textLayer = new pdfjsLib.TextLayer({
+          textContentSource: await page.getTextContent(),
+          container: textLayerDiv,
+          viewport
+        });
+        await textLayer.render();
+      } catch (error) {
+        console.warn("Falha ao renderizar a camada de texto:", error);
+      }
+      return textLayerDiv;
+    }
+
+    async function goToDestination(dest) {
+      try {
+        let explicit = dest;
+        if (typeof explicit === "string") explicit = await pdfDocument.getDestination(explicit);
+        if (!Array.isArray(explicit) || !explicit.length) return;
+        const pageIndex = await pdfDocument.getPageIndex(explicit[0]);
+        goToPage(pageIndex + 1);
+      } catch (error) {
+        console.warn("Falha ao navegar para o destino do link:", error);
+      }
+    }
+
+    function externalLink(href, title) {
+      const link = document.createElement("a");
+      link.href = href;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer nofollow";
+      link.title = title || href;
+      return link;
+    }
+
+    // Camada única de links (posicionada sobre a página). Reúne tanto as
+    // anotações reais quanto as URLs detectadas no texto.
+    function ensureAnnotationLayer(viewport, wrapper) {
+      let layer = wrapper.querySelector(".annotationLayer");
+      if (!layer) {
+        layer = document.createElement("div");
+        layer.className = "annotationLayer";
+        layer.style.width = `${Math.floor(viewport.width)}px`;
+        layer.style.height = `${Math.floor(viewport.height)}px`;
+        wrapper.appendChild(layer);
+      }
+      return layer;
+    }
+
+    // (1) Links que são anotações reais do PDF (subtype "Link").
+    async function renderAnnotationLinks(page, viewport, wrapper) {
+      let annotations;
+      try {
+        annotations = await page.getAnnotations();
+      } catch (error) {
+        console.warn("Falha ao obter anotações:", error);
+        return;
+      }
+
+      const layer = ensureAnnotationLayer(viewport, wrapper);
+      for (const annotation of annotations) {
+        if (annotation.subtype !== "Link") continue;
+        if (!annotation.url && !annotation.dest) continue;
+
+        // `convertToViewportRectangle` não existe nesta build do pdf.js; converte-se
+        // os dois cantos com `convertToViewportPoint` e normaliza para o box.
+        const [x1, y1] = viewport.convertToViewportPoint(annotation.rect[0], annotation.rect[1]);
+        const [x2, y2] = viewport.convertToViewportPoint(annotation.rect[2], annotation.rect[3]);
+
+        const link = annotation.url ? externalLink(annotation.url) : document.createElement("a");
+        if (!annotation.url) {
+          link.href = "#";
+          const dest = annotation.dest;
+          link.addEventListener("click", event => {
+            event.preventDefault();
+            goToDestination(dest);
+          });
+        }
+        link.style.left = `${Math.min(x1, x2)}px`;
+        link.style.top = `${Math.min(y1, y2)}px`;
+        link.style.width = `${Math.abs(x2 - x1)}px`;
+        link.style.height = `${Math.abs(y2 - y1)}px`;
+        layer.appendChild(link);
+      }
+    }
+
+    // (2) URLs que aparecem apenas como TEXTO no PDF (sem anotação). Envolve o
+    // trecho da URL numa âncora INLINE dentro do próprio span da camada de texto.
+    // Como a âncora vive no fluxo do texto, herda a posição, o transform e o
+    // `--scale-x` do span — alinhando-se perfeitamente ao canvas em qualquer zoom,
+    // sem medir coordenadas.
+    function linkifyTextLayer(textLayerDiv) {
+      if (!textLayerDiv) return;
+
+      textLayerDiv.querySelectorAll("span").forEach(span => {
+        // Apenas spans "simples" (um único nó de texto).
+        const node = span.firstChild;
+        if (!node || node.nodeType !== Node.TEXT_NODE || span.childNodes.length !== 1) return;
+
+        const text = node.nodeValue;
+        URL_PATTERN.lastIndex = 0;
+        if (!URL_PATTERN.test(text)) return;
+
+        URL_PATTERN.lastIndex = 0;
+        const fragment = document.createDocumentFragment();
+        let from = 0;
+        let match;
+        while ((match = URL_PATTERN.exec(text)) !== null) {
+          // Remove pontuação final que raramente faz parte da URL.
+          const raw = match[0].replace(/[.,;:!?)\]}'"]+$/, "");
+          if (!raw) continue;
+          const start = match.index;
+          const end = start + raw.length;
+
+          if (start > from) fragment.appendChild(document.createTextNode(text.slice(from, start)));
+
+          const href = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+          const link = externalLink(href, raw);
+          link.className = "pdf-link";
+          link.textContent = text.slice(start, end);
+          fragment.appendChild(link);
+
+          from = end;
+          URL_PATTERN.lastIndex = end; // reposiciona após a pontuação eventualmente removida
+          // console.info(`Link detectado no texto: ${href}`);
+        }
+        if (from < text.length) fragment.appendChild(document.createTextNode(text.slice(from)));
+
+        span.replaceChildren(fragment);
+      });
+    }
+
+    function addWatermark(wrapper) {
+      if (!config.watermark) return;
+      const overlay = document.createElement("div");
+      overlay.className = "watermark";
+      const label = document.createElement("span");
+      label.textContent = config.watermark;
+      overlay.appendChild(label);
+      wrapper.appendChild(overlay);
+    }
+
+    async function renderAllPages() {
+      const generation = ++renderGeneration;
+      pagesElement.replaceChildren();
+      pageWrappers = [];
+      showStatus("Renderizando PDF…");
+
+      const outputScale = Math.min(window.devicePixelRatio || 1, 2);
+
+      for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber++) {
+        if (generation !== renderGeneration) return;
+
+        const page = await pdfDocument.getPage(pageNumber);
+        const viewport = page.getViewport({ scale, rotation: config.rotate });
+        const canvas = document.createElement("canvas");
+        const wrapper = document.createElement("div");
+        const context = canvas.getContext("2d", { alpha: false });
+
+        wrapper.className = "page-wrap";
+        wrapper.dataset.page = String(pageNumber);
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
+        canvas.style.width = `${Math.floor(viewport.width)}px`;
+        canvas.style.height = `${Math.floor(viewport.height)}px`;
+
+        wrapper.appendChild(canvas);
+        pagesElement.appendChild(wrapper);
+        pageWrappers.push(wrapper);
+
+        await page.render({
+          canvasContext: context,
+          viewport,
+          transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0]
+        }).promise;
+
+        if (generation !== renderGeneration) return;
+        const textLayerDiv = needsTextLayer ? await renderTextLayer(page, viewport, wrapper) : null;
+        if (config.links) {
+          await renderAnnotationLinks(page, viewport, wrapper);
+          linkifyTextLayer(textLayerDiv);
+        }
+        addWatermark(wrapper);
+      }
+
+      hideStatus();
+      updateCurrentPageFromScroll();
+
+      // Reaplica o destaque de busca após uma nova renderização (ex.: zoom).
+      if (config.search && searchState.query) performSearch(searchState.query, false);
+    }
+
+    function goToPage(pageNumber) {
+      const target = pageWrappers[pageNumber - 1];
+      if (!target) return;
+      currentPage = pageNumber;
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      updateToolbar();
+    }
+
+    function updateCurrentPageFromScroll() {
+      if (!pageWrappers.length) return;
+      const containerTop = viewerContainer.getBoundingClientRect().top;
+      let bestPage = 1;
+      let bestDistance = Number.POSITIVE_INFINITY;
+
+      pageWrappers.forEach((wrapper, index) => {
+        const distance = Math.abs(wrapper.getBoundingClientRect().top - containerTop - 12);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestPage = index + 1;
+        }
+      });
+
+      currentPage = bestPage;
+      updateToolbar();
+    }
+
+    function fitToWidth() {
+      if (!pdfDocument) return;
+      pdfDocument.getPage(currentPage).then(page => {
+        const unscaled = page.getViewport({ scale: 1, rotation: config.rotate });
+        const availableWidth = Math.max(viewerContainer.clientWidth - 32, 200);
+        scale = clampScale(availableWidth / unscaled.width);
+        renderAllPages().then(() => goToPage(currentPage));
+      });
+    }
+
+    // ---------------------------------------------------------------------------
+    // Busca no texto (baseada na camada de texto renderizada).
+    // Limitação: destaca ocorrências contidas em um único "span"; termos quebrados
+    // entre spans podem não ser encontrados.
+    // ---------------------------------------------------------------------------
+
+    // Remove apenas os <mark> da busca, preservando eventuais <a> (links inline).
+    function clearSearchHighlights() {
+      document.querySelectorAll("#pages .textLayer mark").forEach(mark => {
+        const parent = mark.parentNode;
+        parent.replaceChild(document.createTextNode(mark.textContent), mark);
+        parent.normalize();
+      });
+      searchState.marks = [];
+      searchState.index = -1;
+    }
+
+    // Destaca ocorrências percorrendo os NÓS DE TEXTO do span (inclusive os que
+    // ficam dentro de um <a>), sem reconstruir o span — assim os links inline
+    // continuam intactos durante a busca.
+    function highlightTextNodes(root, query, marks) {
+      const target = query.toLowerCase();
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const textNodes = [];
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) textNodes.push(node);
+
+      for (const node of textNodes) {
+        const text = node.nodeValue;
+        const lower = text.toLowerCase();
+        let position = lower.indexOf(target);
+        if (position === -1) continue;
+
+        const fragment = document.createDocumentFragment();
+        let from = 0;
+        while (position !== -1) {
+          if (position > from) fragment.appendChild(document.createTextNode(text.slice(from, position)));
+          const mark = document.createElement("mark");
+          mark.textContent = text.slice(position, position + query.length);
+          fragment.appendChild(mark);
+          marks.push(mark);
+          from = position + query.length;
+          position = lower.indexOf(target, from);
+        }
+        if (from < text.length) fragment.appendChild(document.createTextNode(text.slice(from)));
+        node.parentNode.replaceChild(fragment, node);
+      }
+    }
+
+    function performSearch(query, resetIndex = true) {
+      clearSearchHighlights();
+      searchState.query = query;
+      if (!query) {
+        updateSearchCount();
+        return;
+      }
+
+      const marks = [];
+      document.querySelectorAll("#pages .textLayer span").forEach(span => {
+        highlightTextNodes(span, query, marks);
+      });
+      searchState.marks = marks;
+
+      if (marks.length) {
+        searchState.index = resetIndex ? 0 : Math.min(Math.max(searchState.index, 0), marks.length - 1);
+        setActiveMatch(searchState.index, resetIndex);
+      } else {
+        searchState.index = -1;
+      }
+      updateSearchCount();
+    }
+
+    function setActiveMatch(index, scrollTo = true) {
+      if (!searchState.marks.length) return;
+      searchState.marks.forEach(mark => mark.classList.remove("active"));
+      const normalized = (index + searchState.marks.length) % searchState.marks.length;
+      searchState.index = normalized;
+      const mark = searchState.marks[normalized];
+      mark.classList.add("active");
+      if (scrollTo) mark.scrollIntoView({ behavior: "smooth", block: "center" });
+      updateSearchCount();
+    }
+
+    function updateSearchCount() {
+      const total = searchState.marks.length;
+      const current = total ? searchState.index + 1 : 0;
+      searchCount.textContent = `${current}/${total}`;
+    }
+
+    function openSearch() {
+      searchBar.classList.add("open");
+      searchInput.focus();
+      searchInput.select();
+    }
+
+    function closeSearch() {
+      searchBar.classList.remove("open");
+      searchInput.value = "";
+      performSearch("");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Download (usa os bytes já carregados; evita novo fetch/CORS).
+    // ---------------------------------------------------------------------------
+
+    async function downloadPdf() {
+      if (!pdfDocument) return;
+      try {
+        const data = await pdfDocument.getData();
+        const blob = new Blob([data], { type: "application/pdf" });
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = "documento.pdf";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(objectUrl);
+      } catch (error) {
+        console.error("Falha no download:", error);
+      }
+    }
+
+    function toggleFullscreen() {
+      if (document.fullscreenElement) {
+        document.exitFullscreen?.();
+      } else {
+        viewerContainer.requestFullscreen?.();
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Eventos.
+    // ---------------------------------------------------------------------------
+
+    prevButton.addEventListener("click", () => goToPage(Math.max(1, currentPage - 1)));
+    nextButton.addEventListener("click", () => goToPage(Math.min(pdfDocument.numPages, currentPage + 1)));
+    zoomOutButton.addEventListener("click", async () => {
+      scale = clampScale(+(scale - config.zoomstep).toFixed(2));
+      await renderAllPages();
+      goToPage(currentPage);
+    });
+    zoomInButton.addEventListener("click", async () => {
+      scale = clampScale(+(scale + config.zoomstep).toFixed(2));
+      await renderAllPages();
+      goToPage(currentPage);
+    });
+    fitButton.addEventListener("click", fitToWidth);
+    viewerContainer.addEventListener("scroll", updateCurrentPageFromScroll, { passive: true });
+
+    downloadButton.addEventListener("click", downloadPdf);
+    fullscreenButton.addEventListener("click", toggleFullscreen);
+
+    searchToggleButton.addEventListener("click", () => {
+      if (searchBar.classList.contains("open")) closeSearch();
+      else openSearch();
+    });
+    searchInput.addEventListener("input", () => performSearch(searchInput.value.trim()));
+    searchInput.addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (searchState.marks.length) setActiveMatch(searchState.index + (event.shiftKey ? -1 : 1));
+      } else if (event.key === "Escape") {
+        closeSearch();
+      }
+    });
+    searchNextButton.addEventListener("click", () => setActiveMatch(searchState.index + 1));
+    searchPrevButton.addEventListener("click", () => setActiveMatch(searchState.index - 1));
+    searchCloseButton.addEventListener("click", closeSearch);
+
+    // Bloqueios de interface — aplicados apenas conforme a configuração (modo restrito por padrão).
+    // São barreiras de conveniência, não proteção absoluta.
+    if (!config.contextmenu) {
+      document.addEventListener("contextmenu", event => event.preventDefault());
+    }
+
+    document.addEventListener("keydown", event => {
+      const key = event.key.toLowerCase();
+
+      // Atalho de busca (quando habilitada).
+      if (config.search && (event.ctrlKey || event.metaKey) && key === "f") {
+        event.preventDefault();
+        openSearch();
+        return;
+      }
+
+      if (config.hotkeys) return; // atalhos liberados
+
+      const blocked = [];
+      if (!config.print) blocked.push("p");
+      if (!config.download) blocked.push("s");
+      blocked.push("u"); // ver código-fonte
+      if ((event.ctrlKey || event.metaKey) && blocked.includes(key)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    }, true);
+
+    if (!config.print) {
+      window.addEventListener("beforeprint", event => {
+        event.preventDefault?.();
+        alert("A impressão deste documento está desabilitada.");
+      });
+    }
+
+    // ---------------------------------------------------------------------------
+    // Inicialização.
+    // ---------------------------------------------------------------------------
+
+    async function start() {
+      applyConfig();
+      updateToolbar();
+
+      let pdfUrl = config.u;
+      try {
+        pdfUrl = resolvePdfSource(config.u);
+        showStatus("Carregando PDF…");
+
+        const loadingTask = pdfjsLib.getDocument({
+          url: pdfUrl,
+          password: config.password || undefined,
+          withCredentials: config.credentials,
+          disableAutoFetch: !config.autofetch,
+          disableStream: !config.stream
+        });
+
+        pdfDocument = await loadingTask.promise;
+        currentPage = Math.min(config.page, pdfDocument.numPages);
+        updateToolbar();
+        await renderAllPages();
+
+        if (!zoomIsNumber && config.fit === "width") {
+          fitToWidth();
+        } else {
+          goToPage(currentPage);
+        }
+      } catch (error) {
+        console.error(error);
+        showStatus("Abrir o arquivo");
+        statusDetail.innerHTML = (
+          `<a href="${pdfUrl}" target="_blank"><button id="open-button" tabindex="1">Abrir</button></a>`
+        );
+        updateToolbar();
+      }
+    }
+    start();
+  </script>
+</body>
+</html>
